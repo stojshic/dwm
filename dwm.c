@@ -49,7 +49,8 @@
 #define CLEANMASK(mask)         (mask & ~(numlockmask|LockMask) & (ShiftMask|ControlMask|Mod1Mask|Mod2Mask|Mod3Mask|Mod4Mask|Mod5Mask))
 #define INTERSECT(x,y,w,h,m)    (MAX(0, MIN((x)+(w),(m)->wx+(m)->ww) - MAX((x),(m)->wx)) \
                                * MAX(0, MIN((y)+(h),(m)->wy+(m)->wh) - MAX((y),(m)->wy)))
-#define ISVISIBLE(C)            ((C->tags & C->mon->tagset[C->mon->seltags]))
+#define ISVISIBLEONTAG(C, T)    ((C->tags & T))
+#define ISVISIBLE(C)            ISVISIBLEONTAG(C, C->mon->tagset[C->mon->seltags])
 #define LENGTH(X)               (sizeof X / sizeof X[0])
 #define MOUSEMASK               (BUTTONMASK|PointerMotionMask)
 #define WIDTH(X)                ((X)->w + 2 * (X)->bw + gappx)
@@ -149,6 +150,7 @@ static int applysizehints(Client *c, int *x, int *y, int *w, int *h, int interac
 static void arrange(Monitor *m);
 static void arrangemon(Monitor *m);
 static void attach(Client *c);
+static void attachaside(Client *c);
 static void attachstack(Client *c);
 static void buttonpress(XEvent *e);
 static void checkotherwm(void);
@@ -159,12 +161,15 @@ static void configure(Client *c);
 static void configurenotify(XEvent *e);
 static void configurerequest(XEvent *e);
 static Monitor *createmon(void);
+static void cyclelayout(const Arg *arg);
 static void destroynotify(XEvent *e);
 static void detach(Client *c);
 static void detachstack(Client *c);
 static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
+static void enqueue(Client *c);
+static void enqueuestack(Client *c);
 static void enternotify(XEvent *e);
 static void expose(XEvent *e);
 static void focus(Client *c);
@@ -185,6 +190,7 @@ static void maprequest(XEvent *e);
 static void monocle(Monitor *m);
 static void motionnotify(XEvent *e);
 static void movemouse(const Arg *arg);
+static Client *nexttagged(Client *c);
 static Client *nexttiled(Client *c);
 static void pop(Client *);
 static void propertynotify(XEvent *e);
@@ -194,7 +200,9 @@ static void resize(Client *c, int x, int y, int w, int h, int interact);
 static void resizeclient(Client *c, int x, int y, int w, int h);
 static void resizemouse(const Arg *arg);
 static void restack(Monitor *m);
+static void rotatestack(const Arg *arg);
 static void run(void);
+static void runAutostart(void);
 static void scan(void);
 static int sendevent(Client *c, Atom proto);
 static void sendmon(Client *c, Monitor *m);
@@ -207,6 +215,8 @@ static void setup(void);
 static void seturgent(Client *c, int urg);
 static void showhide(Client *c);
 static void sigchld(int unused);
+static void sighup(int unused);
+static void sigterm(int unused);
 static void spawn(const Arg *arg);
 static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
@@ -263,6 +273,7 @@ static void (*handler[LASTEvent]) (XEvent *) = {
 	[UnmapNotify] = unmapnotify
 };
 static Atom wmatom[WMLast], netatom[NetLast];
+static int restart = 0;
 static int running = 1;
 static Cur *cursor[CurLast];
 static Clr **scheme;
@@ -413,6 +424,18 @@ attach(Client *c)
 	c->next = c->mon->clients;
 	c->mon->clients = c;
 }
+
+void
+attachaside(Client *c) {
+	Client *at = nexttagged(c);
+	if(!at) {
+		attach(c);
+		return;
+		}
+	c->next = at->next;
+	at->next = c;
+}
+
 
 void
 attachstack(Client *c)
@@ -653,6 +676,23 @@ createmon(void)
 }
 
 void
+cyclelayout(const Arg *arg) {
+	Layout *l;
+	for(l = (Layout *)layouts; l != selmon->lt[selmon->sellt]; l++);
+	if(arg->i > 0) {
+		if(l->symbol && (l + 1)->symbol)
+			setlayout(&((Arg) { .v = (l + 1) }));
+		else
+			setlayout(&((Arg) { .v = layouts }));
+	} else {
+		if(l != layouts && (l - 1)->symbol)
+			setlayout(&((Arg) { .v = (l - 1) }));
+		else
+			setlayout(&((Arg) { .v = &layouts[LENGTH(layouts) - 2] }));
+	}
+}
+
+void
 destroynotify(XEvent *e)
 {
 	Client *c;
@@ -712,8 +752,8 @@ drawbar(Monitor *m)
 	/* draw status first so it can be overdrawn by tags later */
 	if (m == selmon) { /* status is only drawn on selected monitor */
 		drw_setscheme(drw, scheme[SchemeNorm]);
-		sw = TEXTW(stext) - lrpad + 2; /* 2px right padding */
-		drw_text(drw, m->ww - sw, 0, sw, bh, 0, stext, 0);
+		sw = TEXTW(stext);
+		drw_text(drw, m->ww - sw, 0, sw, bh, lrpad / 2, stext, 0);
 	}
 
 	for (c = m->clients; c; c = c->next) {
@@ -757,6 +797,28 @@ drawbars(void)
 
 	for (m = mons; m; m = m->next)
 		drawbar(m);
+}
+
+void
+enqueue(Client *c)
+{
+	Client *l;
+	for (l = c->mon->clients; l && l->next; l = l->next);
+	if (l) {
+		l->next = c;
+		c->next = NULL;
+	}
+}
+
+void
+enqueuestack(Client *c)
+{
+	Client *l;
+	for (l = c->mon->stack; l && l->snext; l = l->snext);
+	if (l) {
+		l->snext = c;
+		c->snext = NULL;
+	}
 }
 
 void
@@ -1070,7 +1132,7 @@ manage(Window w, XWindowAttributes *wa)
 		c->isfloating = c->oldstate = trans != None || c->isfixed;
 	if (c->isfloating)
 		XRaiseWindow(dpy, c->win);
-	attach(c);
+	attachaside(c);
 	attachstack(c);
 	XChangeProperty(dpy, root, netatom[NetClientList], XA_WINDOW, 32, PropModeAppend,
 		(unsigned char *) &(c->win), 1);
@@ -1200,6 +1262,16 @@ movemouse(const Arg *arg)
 	}
 }
 
+ Client *
+nexttagged(Client *c) {
+	Client *walked = c->mon->clients;
+	for(;
+		walked && (walked->isfloating || !ISVISIBLEONTAG(walked, c->tags));
+		walked = walked->next
+	);
+	return walked;
+}
+
 Client *
 nexttiled(Client *c)
 {
@@ -1256,6 +1328,7 @@ propertynotify(XEvent *e)
 void
 quit(const Arg *arg)
 {
+	if(arg->i) restart = 1;
 	running = 0;
 }
 
@@ -1402,6 +1475,38 @@ restack(Monitor *m)
 }
 
 void
+rotatestack(const Arg *arg)
+{
+	Client *c = NULL, *f;
+
+	if (!selmon->sel)
+		return;
+	f = selmon->sel;
+	if (arg->i > 0) {
+		for (c = nexttiled(selmon->clients); c && nexttiled(c->next); c = nexttiled(c->next));
+		if (c){
+			detach(c);
+			attach(c);
+			detachstack(c);
+			attachstack(c);
+		}
+	} else {
+		if ((c = nexttiled(selmon->clients))){
+			detach(c);
+			enqueue(c);
+			detachstack(c);
+			enqueuestack(c);
+		}
+	}
+	if (c){
+		arrange(selmon);
+		//unfocus(f, 1);
+		focus(f);
+		restack(selmon);
+	}
+}
+
+void
 run(void)
 {
 	XEvent ev;
@@ -1410,6 +1515,12 @@ run(void)
 	while (running && !XNextEvent(dpy, &ev))
 		if (handler[ev.type])
 			handler[ev.type](&ev); /* call handler */
+}
+
+void
+runAutostart(void) {
+	system("cd ~/.dwm; ./autostart_blocking.sh");
+	system("cd ~/.dwm; ./autostart.sh &");
 }
 
 void
@@ -1449,7 +1560,7 @@ sendmon(Client *c, Monitor *m)
 	detachstack(c);
 	c->mon = m;
 	c->tags = m->tagset[m->seltags]; /* assign tags of target monitor */
-	attach(c);
+	attachaside(c);
 	attachstack(c);
 	focus(NULL);
 	arrange(NULL);
@@ -1568,6 +1679,9 @@ setup(void)
 	/* clean up any zombies immediately */
 	sigchld(0);
 
+	signal(SIGHUP, sighup);
+	signal(SIGTERM, sigterm);
+
 	/* init screen */
 	screen = DefaultScreen(dpy);
 	sw = DisplayWidth(dpy, screen);
@@ -1577,8 +1691,8 @@ setup(void)
 	drw = drw_create(dpy, screen, root, sw, sh, visual, depth, cmap);
 	if (!drw_fontset_create(drw, fonts, LENGTH(fonts)))
 		die("no fonts could be loaded.");
-	lrpad = drw->fonts->h;
-	bh = drw->fonts->h + 2;
+	lrpad = drw->fonts->h + horizpadbar;
+	bh = drw->fonts->h + vertpadbar;
 	updategeom();
 	/* init atoms */
 	utf8string = XInternAtom(dpy, "UTF8_STRING", False);
@@ -1667,6 +1781,20 @@ sigchld(int unused)
 	if (signal(SIGCHLD, sigchld) == SIG_ERR)
 		die("can't install SIGCHLD handler:");
 	while (0 < waitpid(-1, NULL, WNOHANG));
+}
+
+void
+sighup(int unused)
+{
+	Arg a = {.i = 1};
+	quit(&a);
+}
+
+void
+sigterm(int unused)
+{
+	Arg a = {.i = 0};
+	quit(&a);
 }
 
 void
@@ -1933,6 +2061,7 @@ updategeom(void)
 					detachstack(c);
 					c->mon = mons;
 					attach(c);
+					attachaside(c);
 					attachstack(c);
 				}
 				if (m == selmon)
@@ -2214,7 +2343,9 @@ main(int argc, char *argv[])
 		die("pledge");
 #endif /* __OpenBSD__ */
 	scan();
+	runAutostart();
 	run();
+	if(restart) execvp(argv[0], argv);
 	cleanup();
 	XCloseDisplay(dpy);
 	return EXIT_SUCCESS;
