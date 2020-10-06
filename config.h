@@ -94,6 +94,7 @@ static const char *dmenucmd[]    = { "dmenu_run", "-p", "Run: ", NULL };
 /* static const char *termcmd[]     = { "st", "-e fish", NULL }; */
 static const char *termcmd[]     = { "st", NULL };
 static const char *tabtermcmd[]  = { "tabbed", "-r 2", "st", "-w", "''", NULL };
+static const char *bravecmd[]    = { "brave-beta", "--new-window", NULL };
 
 static Key keys[] = {
 	/* modifier             key        function        argument */
@@ -135,9 +136,9 @@ static Key keys[] = {
 	{ MODKEY|ShiftMask,     XK_period, tagmon,         {.i = +1 } },
 	
     /* Apps Launched with SUPER + ALT + KEY */
+    { MODKEY|Mod1Mask,        XK_w,    spawn,          {.v = bravecmd } },
 	{ MODKEY|Mod1Mask,        XK_b,    spawn,          CMD("tabbed -r 2 surf -pe x '.surf/html/homepage.html'") },
 	{ MODKEY|Mod1Mask,        XK_c,    spawn,          CMD("st -e cmus") },
-	{ MODKEY|Mod1Mask,        XK_e,    spawn,          CMD("st -e emacsclient -c -a emacs") },
 	{ MODKEY|Mod1Mask,        XK_f,    spawn,          CMD("st -e vifm") },
 	{ MODKEY|Mod1Mask,        XK_h,    spawn,          CMD("st -e htop") },
 	{ MODKEY|Mod1Mask,        XK_i,    spawn,          CMD("st -e irssi") },
