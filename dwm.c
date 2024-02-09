@@ -160,7 +160,6 @@ static Monitor *createmon(void);
 static void destroynotify(XEvent *e);
 static void detach(Client *c);
 static void detachstack(Client *c);
-static Monitor *dirtomon(int dir);
 static void drawbar(Monitor *m);
 static void drawbars(void);
 static void enternotify(XEvent *e);
@@ -680,21 +679,6 @@ detachstack(Client *c)
 	}
 }
 
-Monitor *
-dirtomon(int dir)
-{
-	Monitor *m = NULL;
-
-	if (dir > 0) {
-		if (!(m = selmon->next))
-			m = mons;
-	} else if (selmon == mons)
-		for (m = mons; m->next; m = m->next);
-	else
-		for (m = mons; m->next != selmon; m = m->next);
-	return m;
-}
-
 void
 drawbar(Monitor *m)
 {
@@ -736,7 +720,7 @@ drawbar(Monitor *m)
 
 	if ((w = m->ww - tw - x) > bh) {
 		if (m->sel) {
-			drw_setscheme(drw, scheme[m == selmon ? SchemeSel : SchemeNorm]);
+			drw_setscheme(drw, scheme[SchemeNorm]);
 			drw_text(drw, x, 0, w, bh, lrpad / 2, m->sel->name, 0);
 			if (m->sel->isfloating)
 				drw_rect(drw, x + boxs, boxs, boxw, boxw, m->sel->isfixed, 0);
@@ -824,15 +808,20 @@ focusin(XEvent *e)
 void
 focusmon(const Arg *arg)
 {
-	Monitor *m;
+	Monitor *m = NULL;
+       if (!mons->next)
+           return;
 
-	if (!mons->next)
-		return;
-	if ((m = dirtomon(arg->i)) == selmon)
-		return;
-	unfocus(selmon->sel, 0);
-	selmon = m;
-	focus(NULL);
+       if (arg->i > 0) {
+           m = mons->next;
+       } else if (arg->i < 0 && mons->next) {
+           m = mons;
+       }
+
+       if (m) {
+           selmon = m;
+           focus(NULL);
+       }
 }
 
 void
@@ -1679,10 +1668,23 @@ tag(const Arg *arg)
 void
 tagmon(const Arg *arg)
 {
-	if (!selmon->sel || !mons->next)
-		return;
-	sendmon(selmon->sel, dirtomon(arg->i));
-}
+        if (!selmon->sel || !mons->next)
+            return;
+
+        Monitor *m;
+
+        if (arg->i > 0) {
+            m = mons->next;  // Move to mon1
+        } else if (arg->i < 0 && mons->next) {
+            m = mons;  // Move to mon2
+        } else {
+            return; // Do nothing for arg->i == 0
+        }
+
+        sendmon(selmon->sel, m);
+        focus(NULL);
+        arrange(selmon);
+ }
 
 void
 tile(Monitor *m)
